@@ -11,10 +11,14 @@ import io
 import shutil
 import re
 import gc
+import os
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Amazon Scraper Hub", layout="wide")
 st.title("🛒 Amazon Global Automated Scraper")
+
+# --- CONSTANTS ---
+PROGRESS_FILE = "amazon_scrape_progress.csv"
 
 # --- AMAZON GLOBAL DOMAINS ---
 AMAZON_DOMAINS = {
@@ -22,39 +26,27 @@ AMAZON_DOMAINS = {
     "United States (.com)": "www.amazon.com",
     "Canada (.ca)": "www.amazon.ca",
     "Mexico (.com.mx)": "www.amazon.com.mx",
-    "Brazil (.com.br)": "www.amazon.com.br",
     "United Kingdom (.co.uk)": "www.amazon.co.uk",
     "Germany (.de)": "www.amazon.de",
     "France (.fr)": "www.amazon.fr",
-    "Spain (.es)": "www.amazon.es",
-    "Italy (.it)": "www.amazon.it",
-    "Netherlands (.nl)": "www.amazon.nl",
-    "Poland (.pl)": "www.amazon.pl",
-    "Sweden (.se)": "www.amazon.se",
-    "Ireland (.ie)": "www.amazon.ie",
-    "Belgium (.com.be)": "www.amazon.com.be",
-    "Turkey (.com.tr)": "www.amazon.com.tr",
-    "United Arab Emirates (.ae)": "www.amazon.ae",
-    "Saudi Arabia (.sa)": "www.amazon.sa",
-    "South Africa (.co.za)": "www.amazon.co.za",
     "India (.in)": "www.amazon.in",
-    "Singapore (.sg)": "www.amazon.sg",
-    "Japan (.co.jp)": "www.amazon.co.jp",
-    "Australia (.com.au)": "www.amazon.com.au"
+    "United Arab Emirates (.ae)": "www.amazon.ae",
+    "Saudi Arabia (.sa)": "www.amazon.sa"
 }
 
-# --- SELENIUM HEADLESS SETUP (LOW MEMORY MODE) ---
+# --- SELENIUM HEADLESS SETUP ---
 def get_driver():
     options = Options()
     options.add_argument('--headless')
     options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage') # Crucial for low-RAM Linux servers
+    options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-gpu')
-    options.add_argument('--disable-extensions')    # Strips out extra memory usage
+    options.add_argument('--disable-extensions')    
     options.add_argument('--disable-infobars')
     options.add_argument('--window-size=1920,1080')
     options.add_argument('--disable-blink-features=AutomationControlled')
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
+    # Use a more randomized/updated user agent if bot detection persists
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36")
     
     chromium_path = shutil.which('chromium')
     chromedriver_path = shutil.which('chromedriver')
@@ -67,7 +59,7 @@ def get_driver():
         
     return webdriver.Chrome(service=service, options=options)
 
-# --- LAYER 1: MULTI-PAGE SELLER LINK EXTRACTION ---
+# --- LAYER 1: SELLER LINK EXTRACTION ---
 def extract_seller_urls(driver, seller_url, status_element):
     product_urls = []
     current_url = seller_url
@@ -84,8 +76,9 @@ def extract_seller_urls(driver, seller_url, status_element):
         for item in items:
             asin = item.get_attribute("data-asin")
             if asin and len(asin) > 5:
-                # Extract links based on the Egyptian storefront domain for Option 2
-                product_urls.append(f"https://www.amazon.eg/dp/{asin}")
+                domain = re.search(r"https://(www\.amazon\.[a-z\.]+)/", current_url)
+                base_domain = domain.group(1) if domain else "www.amazon.com"
+                product_urls.append(f"https://{base_domain}/dp/{asin}")
                 page_items_count += 1
                 
         if page_items_count == 0:
@@ -103,7 +96,7 @@ def extract_seller_urls(driver, seller_url, status_element):
             
     return list(dict.fromkeys(product_urls))
 
-# --- LAYER 2: ROBUST IMAGE EXTRACTION ---
+# --- LAYER 2: IMAGE EXTRACTION ---
 def get_real_amazon_images(driver):
     image_urls = []
     try:
@@ -142,11 +135,18 @@ def get_product_details(driver, url):
     driver.get(url)
     time.sleep(5)  
     
+    # Check for Captcha
+    if "captcha" in driver.page_source.lower() or "bot" in driver.page_source.lower():
+        return {"URL": url, "Title": "BLOCKED BY CAPTCHA", "Brand": "BLOCKED", "Error": "Amazon Bot Detection"}
+
     real_images = get_real_amazon_images(driver)
     soup = BeautifulSoup(driver.page_source, 'html.parser')
     
-    title = driver.find_element(By.CSS_SELECTOR, "#productTitle").text.strip() if driver.find_elements(By.CSS_SELECTOR, "#productTitle") else "None"
-    brand = driver.find_element(By.CSS_SELECTOR, "#bylineInfo").text.strip() if driver.find_elements(By.CSS_SELECTOR, "#bylineInfo") else "None"
+    title_el = driver.find_elements(By.CSS_SELECTOR, "#productTitle")
+    title = title_el[0].text.strip() if title_el else "None"
+    
+    brand_el = driver.find_elements(By.CSS_SELECTOR, "#bylineInfo")
+    brand = brand_el[0].text.strip() if brand_el else "None"
     
     breadcrumb = []
     breadcrumb_el = driver.find_elements(By.CSS_SELECTOR, "#wayfinding-breadcrumbs_feature_div ul")
@@ -158,7 +158,8 @@ def get_product_details(driver, url):
     if about_el:
         about_items = [li.text.strip() for li in about_el[0].find_elements(By.TAG_NAME, 'li')]
 
-    product_description = driver.find_element(By.CSS_SELECTOR, "#productDescription").text.strip() if driver.find_elements(By.CSS_SELECTOR, "#productDescription") else "None"
+    desc_el = driver.find_elements(By.CSS_SELECTOR, "#productDescription")
+    product_description = desc_el[0].text.strip() if desc_el else "None"
         
     details_dict = {}
     for row in driver.find_elements(By.CSS_SELECTOR, "#detailBullets_feature_div li"):
@@ -170,17 +171,23 @@ def get_product_details(driver, url):
     tech_specs_dict = {}
     for row in driver.find_elements(By.CSS_SELECTOR, "#productDetails_techSpec_section_1 tr"):
         try:
-            tech_specs_dict[row.find_element(By.TAG_NAME, "th").text.strip()] = row.find_element(By.TAG_NAME, "td").text.strip()
+            th = row.find_element(By.TAG_NAME, "th").text.strip()
+            td = row.find_element(By.TAG_NAME, "td").text.strip()
+            tech_specs_dict[th] = td
         except:
             pass
             
     images_dict = {f"Image {i+1}": img for i, img in enumerate(real_images)}
     
-    return {
+    result = {
         "URL": url, "Title": title, "Brand": brand, "Breadcrumb": ", ".join(breadcrumb),
         "About This Item": "; ".join(about_items), "Product Description": product_description,
-        **images_dict, **details_dict, **tech_specs_dict
     }
+    result.update(images_dict)
+    result.update(details_dict)
+    result.update(tech_specs_dict)
+    
+    return result
 
 # --- CONTROL USER INTERFACE ---
 st.markdown("### 🛠️ Configuration Panel")
@@ -193,7 +200,6 @@ scrape_mode = st.selectbox(
 input_format = "Full URLs"
 selected_domain = "www.amazon.eg"
 
-# --- CONDITIONAL INTERFACE LAYOUT ---
 if "Option 1" in scrape_mode:
     input_format = st.radio("Input Type:", ["Full URLs", "ASINs"], horizontal=True)
     
@@ -205,9 +211,20 @@ if "Option 1" in scrape_mode:
     with col1:
         urls_input = st.text_area(f"Paste {input_format} here (one per line):", height=150)
     with col2:
-        uploaded_file = st.file_uploader(f"Or upload an Excel / CSV file containing {input_format}", type=['csv', 'xlsx'])
+        uploaded_file = st.file_uploader(f"Or upload an Excel/CSV file containing {input_format}", type=['csv', 'xlsx'])
 else:
     seller_input = st.text_input("Paste Amazon Seller Storefront URL (e.g., https://www.amazon.eg/s?me=...):")
+
+st.markdown("### ⚙️ Run Settings")
+resume_run = st.checkbox("🔄 Resume from stopped run (Skips already scraped URLs in saved file)", value=True)
+clear_cache = st.button("🗑️ Clear Saved Progress File")
+
+if clear_cache:
+    if os.path.exists(PROGRESS_FILE):
+        os.remove(PROGRESS_FILE)
+        st.success("Previous progress deleted. Starting fresh next time.")
+    else:
+        st.info("No saved progress to delete.")
 
 st.divider()
 
@@ -217,7 +234,7 @@ if st.button("Run Extraction Pipeline", type="primary"):
     final_urls = []
     should_continue = True
     
-    # 1. Input Processing Phase (No browser needed yet)
+    # 1. Input Processing
     if "Option 1" in scrape_mode:
         raw_inputs = []
         if urls_input:
@@ -233,7 +250,6 @@ if st.button("Run Extraction Pipeline", type="primary"):
                 st.error(f"Error parsing uploaded file: {e}")
                 should_continue = False
         
-        # Convert ASINs to full URLs based on the selected region
         combined_urls = []
         if input_format == "ASINs":
             for val in raw_inputs:
@@ -247,15 +263,13 @@ if st.button("Run Extraction Pipeline", type="primary"):
             st.warning(f"Please enter {input_format} or upload a valid file.")
             should_continue = False
             
-    else: # Option 2 Execution validation
+    else: 
         if not seller_input:
             st.warning("Please enter a valid seller URL.")
             should_continue = False
 
     # 2. Main Scrape Engine 
     if should_continue:
-        
-        # Phase A: Get list of store URLs if using Option 2
         if "Option 2" in scrape_mode:
             storefront_driver = get_driver()
             try:
@@ -263,41 +277,61 @@ if st.button("Run Extraction Pipeline", type="primary"):
                     final_urls = extract_seller_urls(storefront_driver, seller_input, status_text)
                     st.info(f"🏬 Storefront Map Complete: Discovered **{len(final_urls)}** target products.")
             finally:
-                storefront_driver.quit() # Close browser after mapping
+                storefront_driver.quit() 
                 gc.collect()
 
-        # Phase B: Deep Detail Scraping (EXTREME MEMORY SAVER)
         if not final_urls:
             st.warning("No operational URLs located. Check inputs.")
         else:
-            results = []
-            progress_bar = st.progress(0)
-            
-            for index, url in enumerate(final_urls):
-                status_text.text(f"📦 Progress: Processing item {index + 1} of {len(final_urls)} → {url}")
-                
-                # CRITICAL: Open a clean browser instance for EVERY single page
-                single_driver = get_driver()
+            # --- RESUME LOGIC ---
+            already_scraped = set()
+            if resume_run and os.path.exists(PROGRESS_FILE):
                 try:
-                    results.append(get_product_details(single_driver, url))
+                    existing_df = pd.read_csv(PROGRESS_FILE)
+                    if "URL" in existing_df.columns:
+                        already_scraped = set(existing_df["URL"].tolist())
+                        st.info(f"🔄 Resuming... Found {len(already_scraped)} items already saved. Skipping those.")
                 except Exception as e:
-                    st.error(f"Failed asset pull on {url}: {e}")
-                finally:
-                    # CRITICAL: Instantly kill the browser and wipe memory after each item
-                    single_driver.quit()
-                    gc.collect()
-                
-                progress_bar.progress((index + 1) / len(final_urls))
-                
-            status_text.success("✨ Processing pipeline finalized successfully!")
+                    st.warning(f"Failed to read progress file. Starting fresh. Error: {e}")
             
-            if results:
-                df = pd.DataFrame(results)
-                st.dataframe(df)
+            pending_urls = [u for u in final_urls if u not in already_scraped]
+
+            if not pending_urls:
+                st.success("✨ All URLs have already been scraped in a previous run!")
+            else:
+                progress_bar = st.progress(0)
+                
+                for index, url in enumerate(pending_urls):
+                    status_text.text(f"📦 Progress: Processing pending item {index + 1} of {len(pending_urls)} → {url}")
+                    
+                    single_driver = get_driver()
+                    try:
+                        scraped_data = get_product_details(single_driver, url)
+                        
+                        # INCREMENTAL SAVE TO HARD DRIVE IMMEDIATELY
+                        df_incremental = pd.DataFrame([scraped_data])
+                        # Append to CSV. If file doesn't exist, write headers.
+                        file_exists = os.path.exists(PROGRESS_FILE)
+                        df_incremental.to_csv(PROGRESS_FILE, mode='a', header=not file_exists, index=False)
+                        
+                    except Exception as e:
+                        st.error(f"Failed asset pull on {url}: {e}")
+                    finally:
+                        single_driver.quit()
+                        gc.collect()
+                    
+                    progress_bar.progress((index + 1) / len(pending_urls))
+                    
+                status_text.success("✨ Processing pipeline finalized successfully!")
+            
+            # --- FINAL OUTPUT PRESENTATION ---
+            if os.path.exists(PROGRESS_FILE):
+                final_df = pd.read_csv(PROGRESS_FILE)
+                st.dataframe(final_df)
                 
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    df.to_excel(writer, index=False, sheet_name='Master Catalog Data')
+                    final_df.to_excel(writer, index=False, sheet_name='Master Catalog Data')
                 
                 st.download_button(
                     label="📥 Download Consolidated Master Dataset (Excel)",
