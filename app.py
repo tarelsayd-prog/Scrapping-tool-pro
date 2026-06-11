@@ -35,19 +35,16 @@ def fetch_html_via_api(target_url):
     Sends the Amazon URL to ScraperAPI to bypass blocks and return clean HTML.
     Uses premium/residential proxies automatically for Amazon.
     """
-    # Retrieve the API key securely from Streamlit Secrets
     try:
         api_key = st.secrets["SCRAPER_API_KEY"]
     except Exception:
-        st.error("🔑 Missing SCRAPER_API_KEY in Streamlit Secrets!")
+        st.error("🔑 Missing SCRAPER_API_KEY in Streamlit Secrets! Please add it in your Streamlit Cloud dashboard.")
         return None
 
-    # Construct ScraperAPI request URL
-    # 'render=true' can be added if JavaScript rendering is needed, but plain HTML is faster and uses fewer credits
     payload = {
         'api_key': api_key,
         'url': target_url,
-        'premium': 'true' # Highly recommended for Amazon to avoid blocks
+        'premium': 'true' 
     }
     
     proxy_url = "http://api.scraperapi.com/?" + urllib.parse.urlencode(payload)
@@ -91,7 +88,6 @@ def extract_seller_urls(seller_url, status_element):
         if page_items_count == 0:
             break
             
-        # Try to locate the next page link
         next_button = soup.select_one("a.s-pagination-next")
         if next_button and "s-pagination-disabled" not in next_button.get("class", []):
             href = next_button.get("href")
@@ -119,44 +115,36 @@ def get_product_details(url):
         
     soup = BeautifulSoup(html, 'html.parser')
     
-    # Check if Amazon still caught us (Highly unlikely with Premium ScraperAPI proxies)
     if "captcha" in html.lower() or "bot detection" in html.lower():
         return {"URL": url, "Title": "BLOCKED BY CAPTCHA", "Error": "Amazon Bot Detection"}
 
-    # Extract Title
     title_el = soup.select_one("#productTitle")
     title = title_el.get_text().strip() if title_el else "None"
     
-    # Extract Brand
     brand_el = soup.select_one("#bylineInfo")
     brand = brand_el.get_text().strip() if brand_el else "None"
     
-    # Extract Breadcrumbs
     breadcrumb = []
     breadcrumb_ul = soup.select_one("#wayfinding-breadcrumbs_feature_div ul")
     if breadcrumb_ul:
         breadcrumb = [a.get_text().strip() for a in breadcrumb_ul.find_all('a')]
 
-    # Extract Bullet Points
     about_items = []
     about_ul = soup.select_one("#feature-bullets ul")
     if about_ul:
         about_items = [li.get_text().strip() for li in about_ul.find_all('li') if not li.get('id')]
 
-    # Extract Description
     desc_el = soup.select_one("#productDescription")
     product_description = desc_el.get_text().strip() if desc_el else "None"
         
-    # Extract Technical Specification Bullets
     details_dict = {}
     for li in soup.select("#detailBullets_feature_div li"):
         text = li.get_text().strip()
-        text = re.sub(r'\s+', ' ', text) # Clean up spaces/newlines
+        text = re.sub(r'\s+', ' ', text) 
         if ":" in text:
             key, value = text.split(":", 1)
             details_dict[key.strip()] = value.strip()
 
-    # Extract Technical Specification Table
     tech_specs_dict = {}
     for row in soup.select("#productDetails_techSpec_section_1 tr"):
         th = row.find("th")
@@ -164,12 +152,11 @@ def get_product_details(url):
         if th and td:
             tech_specs_dict[th.get_text().strip()] = td.get_text().strip()
             
-    # Extract Images from standard fallback img attributes
     image_urls = []
     for img in soup.select("#altImages img"):
         src = img.get("src")
         if src and ("." in src):
-            clean_src = re.sub(r"\._.*_\.", ".", src) # Get high-res version
+            clean_src = re.sub(r"\._.*_\.", ".", src) 
             if "media-amazon" in clean_src:
                 image_urls.append(clean_src)
     
@@ -299,11 +286,19 @@ if st.button("Run Extraction Pipeline", type="primary"):
                     try:
                         scraped_data = get_product_details(url)
                         
-                        # INCREMENTAL SAVE TO HARD DRIVE IMMEDIATELY
+                        # INCREMENTAL SAVE TO HARD DRIVE IMMEDIATELY (SAFE MERGE)
                         df_incremental = pd.DataFrame([scraped_data])
-                        file_exists = os.path.exists(PROGRESS_FILE)
-                        df_incremental.to_csv(PROGRESS_FILE, mode='a', header=not file_exists, index=False)
                         
+                        if os.path.exists(PROGRESS_FILE):
+                            try:
+                                existing_df = pd.read_csv(PROGRESS_FILE)
+                                updated_df = pd.concat([existing_df, df_incremental], ignore_index=True)
+                                updated_df.to_csv(PROGRESS_FILE, index=False)
+                            except Exception:
+                                df_incremental.to_csv(PROGRESS_FILE, index=False)
+                        else:
+                            df_incremental.to_csv(PROGRESS_FILE, index=False)
+                            
                     except Exception as e:
                         st.error(f"Failed asset pull on {url}: {e}")
                     
@@ -313,16 +308,19 @@ if st.button("Run Extraction Pipeline", type="primary"):
             
             # --- FINAL OUTPUT PRESENTATION ---
             if os.path.exists(PROGRESS_FILE):
-                final_df = pd.read_csv(PROGRESS_FILE)
-                st.dataframe(final_df)
-                
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    final_df.to_excel(writer, index=False, sheet_name='Master Catalog Data')
-                
-                st.download_button(
-                    label="📥 Download Consolidated Master Dataset (Excel)",
-                    data=buffer.getvalue(),
-                    file_name="amazon_master_catalog_details.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                try:
+                    final_df = pd.read_csv(PROGRESS_FILE)
+                    st.dataframe(final_df)
+                    
+                    buffer = io.BytesIO()
+                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                        final_df.to_excel(writer, index=False, sheet_name='Master Catalog Data')
+                    
+                    st.download_button(
+                        label="📥 Download Consolidated Master Dataset (Excel)",
+                        data=buffer.getvalue(),
+                        file_name="amazon_master_catalog_details.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                except Exception as e:
+                    st.error(f"Error reading the final output file: {e}")
