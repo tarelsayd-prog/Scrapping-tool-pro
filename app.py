@@ -7,6 +7,7 @@ import io
 import re
 import os
 import urllib.parse
+import json
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Amazon Scraper Hub", layout="wide")
@@ -106,7 +107,7 @@ def extract_seller_urls(seller_url, status_element):
             
     return list(dict.fromkeys(product_urls))
 
-# --- LAYER 2: PRODUCT DEEP DETAILS SCRAPER ---
+# --- LAYER 2: PRODUCT DEEP DETAILS SCRAPER (UPGRADED) ---
 def get_product_details(url):
     html = fetch_html_via_api(url)
     
@@ -118,12 +119,24 @@ def get_product_details(url):
     if "captcha" in html.lower() or "bot detection" in html.lower():
         return {"URL": url, "Title": "BLOCKED BY CAPTCHA", "Error": "Amazon Bot Detection"}
 
+    # 1. CORE PRODUCT IDENTIFIERS
     title_el = soup.select_one("#productTitle")
     title = title_el.get_text().strip() if title_el else "None"
     
     brand_el = soup.select_one("#bylineInfo")
     brand = brand_el.get_text().strip() if brand_el else "None"
     
+    # 2. PRICING & METRICS
+    price_el = soup.select_one("#corePrice_feature_div .a-price .a-offscreen, #priceblock_ourprice, #priceblock_dealprice")
+    price = price_el.get_text().strip() if price_el else "None"
+
+    rating_el = soup.select_one("#acrPopover")
+    rating = rating_el.get("title").strip() if rating_el and rating_el.get("title") else "None"
+
+    reviews_el = soup.select_one("#acrCustomerReviewText")
+    reviews = reviews_el.get_text().strip() if reviews_el else "None"
+    
+    # 3. CATEGORY & TEXT DETAILS
     breadcrumb = []
     breadcrumb_ul = soup.select_one("#wayfinding-breadcrumbs_feature_div ul")
     if breadcrumb_ul:
@@ -137,6 +150,7 @@ def get_product_details(url):
     desc_el = soup.select_one("#productDescription")
     product_description = desc_el.get_text().strip() if desc_el else "None"
         
+    # 4. TECHNICAL SPECIFICATIONS
     details_dict = {}
     for li in soup.select("#detailBullets_feature_div li"):
         text = li.get_text().strip()
@@ -152,20 +166,47 @@ def get_product_details(url):
         if th and td:
             tech_specs_dict[th.get_text().strip()] = td.get_text().strip()
             
+    # 5. ADVANCED HIGH-RES IMAGE EXTRACTION
     image_urls = []
-    for img in soup.select("#altImages img"):
-        src = img.get("src")
-        if src and ("." in src):
-            clean_src = re.sub(r"\._.*_\.", ".", src) 
-            if "media-amazon" in clean_src:
-                image_urls.append(clean_src)
     
-    image_urls = list(set(image_urls))[:7]
+    scripts = soup.find_all('script')
+    for script in scripts:
+        if script.string and 'colorImages' in script.string:
+            match = re.search(r'"colorImages":\s*\{"initial":\s*(\[.*?\])\}', script.string)
+            if match:
+                try:
+                    images_data = json.loads(match.group(1))
+                    for img in images_data:
+                        if "hiRes" in img and img["hiRes"]:
+                            image_urls.append(img["hiRes"])
+                        elif "large" in img and img["large"]:
+                            image_urls.append(img["large"])
+                except Exception:
+                    pass
+            break 
+
+    if not image_urls:
+        for img in soup.select("#altImages img"):
+            src = img.get("src")
+            if src and ("." in src):
+                clean_src = re.sub(r"\._.*_\.", ".", src) 
+                if "media-amazon" in clean_src:
+                    image_urls.append(clean_src)
+    
+    image_urls = list(dict.fromkeys(image_urls))
     images_dict = {f"Image {i+1}": img for i, img in enumerate(image_urls)}
     
+    # 6. ASSEMBLE FINAL DATA RECORD
     result = {
-        "URL": url, "Title": title, "Brand": brand, "Breadcrumb": ", ".join(breadcrumb),
-        "About This Item": "; ".join(about_items), "Product Description": product_description,
+        "URL": url, 
+        "Title": title, 
+        "Brand": brand, 
+        "Price": price,
+        "Rating": rating,
+        "Reviews": reviews,
+        "Breadcrumb": ", ".join(breadcrumb),
+        "About This Item": "; ".join(about_items), 
+        "Product Description": product_description,
     }
     result.update(images_dict)
     result.update(details_dict)
@@ -292,6 +333,7 @@ if st.button("Run Extraction Pipeline", type="primary"):
                         if os.path.exists(PROGRESS_FILE):
                             try:
                                 existing_df = pd.read_csv(PROGRESS_FILE)
+                                # Safe merge: pd.concat aligns columns perfectly even if they differ
                                 updated_df = pd.concat([existing_df, df_incremental], ignore_index=True)
                                 updated_df.to_csv(PROGRESS_FILE, index=False)
                             except Exception:
